@@ -14,16 +14,16 @@ def spline_line_intersection(spline, th,center=(0,0)):
     x_vals = spline(s)[:,0]-center[0]
     y_vals = spline(s)[:,1]-center[1]
     #find the first intersection
-    index = np.argmax(x_vals*np.cos(th)+y_vals*np.sin(th))
+    index = np.argmax(x_vals*np.cos(th)+y_vals*np.sin(th)) # find the point with maximum projection on the line using the dot product
     
     sg = s[index]
-    # the other should be in the oposite side, there fore if s1 more than 0.5 subtract 0.5, else add 0.5
-
-    def equations(s):
+    #finde the root using fsolve 
+    def equations(s): 
+        # function to find the root using the cross product between the ray and the coordinates
         coords = spline(s)
         return (coords[:,0]-center[0])*np.sin(th) - (coords[:,1]-center[1])*np.cos(th)
     
-    root = sg#fsolve(equations, sg)[0]
+    root = fsolve(equations, sg)[0]
     return root
 
 def cutting_patern(isolevels, height, N = 6, center = None):
@@ -58,7 +58,6 @@ def cutting_patern(isolevels, height, N = 6, center = None):
         lenght = isolevels[j][0][1]
         sub_cuts_overlap = []
         for i in range(len(cuts[j])):
-            #print(root1_low, root2_low)
             w = np.sqrt(np.sum((isolevels[j+1][0][0](cuts[j+1][i])[:2]-isolevels[j][0][0](cuts[j][i])[:2])**2)) # distance between the two isolines at this cut
             D = (delta*w)**(1/3) # overlap distance we assume that F/(NB) = 1 
             print(D)
@@ -70,32 +69,39 @@ def cutting_patern(isolevels, height, N = 6, center = None):
             sub_cuts_overlap.append(new_cut)
 
         cuts_with_overlap.append(sub_cuts_overlap)
-    #print("cuts with overlap:", cuts_with_overlap)
+    # Now plot the cutting pattern
+    cut_spans = []
     for j in range(len(height)-1):
+        from_to_spans = []
         spline = isolevels[j][0][0]
         for i in range(int(N/2)):   
             if j%2 ==0:
-                #print(j,i,2*i,2*i+1,cuts_with_overlap[j][2*i], cuts_with_overlap[j][2*i+1])
                 from_s = cuts_with_overlap[j][2*i]
                 to_s = cuts_with_overlap[j][2*i+1]
-                if to_s<from_s:
-                    to_s +=1
-                s_span = np.linspace(from_s, to_s, 100)
-                plt.plot(spline(s_span)[:,0],spline(s_span)[:,1],'-r',label = '{},{}'.format(j,i)) # add overlap to the cut
             else:
-                #print(j,i,2*i+1,2*(i+1)%N,cuts_with_overlap[j][2*i+1], cuts_with_overlap[j][2*(i+1)%N])
                 from_s = cuts_with_overlap[j][2*i+1]
                 to_s = cuts_with_overlap[j][2*(i+1)%N]
-                if to_s<from_s:
-                    to_s +=1
-                s_span = np.linspace(from_s, to_s, 100)
-                plt.plot(spline(s_span)[:,0],spline(s_span)[:,1],'-b',label = '{},{}'.format(j,i)) # add overlap to the cut
-            # add overlap to the cut
+            if to_s<from_s:
+                to_s +=1
+            from_to_spans.append((from_s, to_s))
+        cut_spans.append(from_to_spans)
+    return cut_spans
+
+def plot_cutting_pattern(isolevels, cutting_lines):
+    fig, ax = plt.subplots()
+    for j in range(len(isolevels)-1):
+        spline = isolevels[j][0][0]
+        # plot the cutting lines
+        for span in cutting_lines[j]:
+            from_s, to_s = span
+            span_s = np.linspace(from_s, to_s, 100)
+            ax.plot(spline(span_s)[:,0], spline(span_s)[:,1], 'r-', linewidth=2)
+    ax.set_aspect('equal')
     plt.show()
-    
             
 def main():
-    v, f = igl.read_triangle_mesh('../data/trumpet.obj') # load a mesh
+    # Example of usage
+    v, f = igl.read_triangle_mesh('../data/parabole.obj') # load a mesh
     h = v[:,2]
     vals = np.linspace(h.min()*1.05,h.max()*0.95,15)
     iso = isolines(v,f)
@@ -103,7 +109,9 @@ def main():
     for val in vals:
         line =iso.isolinecoords([np.array([0,0,1]),np.array([0,0,val])])
         lines.append(line)
-    cutting_patern(lines, vals, N = 6)
+    cutting_lines = cutting_patern(lines, vals, N = 6)
+    # Plot the cutting pattern
+    plot_cutting_pattern(lines, cutting_lines)
 if __name__ == "__main__":
     main()
             
