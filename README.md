@@ -10,6 +10,6 @@ No special procedure is required to install; just clone the repository. A requir
 
 ## Usage
 
-## Acknolegement
+## Acknowledgement
 
 
