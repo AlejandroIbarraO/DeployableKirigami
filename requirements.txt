@@ -1,5 +1,6 @@
 numpy
-matplotlib
 scipy
-igl
-polyscope
+matplotlib
+libigl
+triangle
+shapely

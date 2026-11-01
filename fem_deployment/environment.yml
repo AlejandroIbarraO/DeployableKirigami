@@ -1,0 +1,12 @@
+# FEniCSx environment for the shell deployment (DOLFINx 0.11 with MUMPS)
+#   conda env create -f fem_deployment/environment.yml   (or mamba / micromamba)
+name: kirigami-fenicsx
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - fenics-dolfinx=0.11
+  - petsc=*=real*
+  - mpich
+  - numpy
+  - matplotlib

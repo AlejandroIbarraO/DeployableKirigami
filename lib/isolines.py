@@ -5,171 +5,157 @@ Created on Tue Mar  5 10:39:08 2024
 @author: Alejandro
 """
 
+import os
+
 import igl
 import numpy as np
 from scipy.interpolate import make_interp_spline
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
+
 
 class isolines:
-    def __init__(self,v,f):
+    def __init__(self,v,f,k = 3):
         self.v = v
         self.f = f
-        
+        self.k = k # degree of the interpolating splines
+
     def cross_surface(self, plane):
-        """  Given a plane defined by the normal and the center position calcuate 
-        which triangles are cuted by the plane
-        
+        """ Given a plane defined by the normal and the center position calculate
+        where the plane crosses the edges of the mesh
+
         input:
-        
+
         plane = [normal,center]
-        
+
         output:
-            
-        crossed triangle indices and midpoint in the triangle where was crossed
-        
+
+        crossed triangle indices, for each crossed triangle the keys of its two
+        crossed edges, and a look up table edge key -> crossing point
         """
-        d = np.dot((self.v-plane[1]),plane[0]) # distance of the point to a plane
-        d = d/np.abs(d)>0 # normalice to get the side
-        cross_clasification = d[self.f].sum(axis = 1) # eval in the triangles and clasifie the croessin (which side)
-        crossed_triangles = np.logical_and(cross_clasification<3,cross_clasification>0) # check if the triangle is crossed by the plane
+        d = np.dot((self.v-plane[1]),plane[0]) # signed distance of the vertices to the plane
+        side = d > 0 # a vertex lying on the plane counts as below, so every crossed edge has d[a] != d[b]
+        n_v = len(self.v)
 
-        dtri2 = d[self.f] 
-        # search for the crossing point --> some clasification of vertices and geometry
-        index_source = ~dtri2*(cross_clasification==2).reshape(-1,1)+dtri2*(cross_clasification==1).reshape(-1,1)
-        index_end = dtri2*(cross_clasification==2).reshape(-1,1)+~dtri2*(cross_clasification==1).reshape(-1,1)
-        index_source = self.f[index_source]
-        index_end = self.f[index_end].reshape(-1,2)
-        v_source = self.v[index_source,:]
-        v_end_1 =self.v[index_end[:,0]]
-        v_end_2 = self.v[index_end[:,1]]
-        t1 = np.dot(plane[1]-v_source,plane[0])/np.dot(v_end_1-v_source,plane[0])
-        t1 = t1.reshape(-1,1)
-        t2 = np.dot(plane[1]-v_source,plane[0])/np.dot(v_end_2-v_source,plane[0])
-        t2 = t2.reshape(-1,1)
-        p_cross = 0.5*(v_end_1*t1+v_end_2*t2 + v_source*(2-t1-t2))
-        
-        data = {}
-        for tri,cord in zip(np.nonzero(crossed_triangles)[0], p_cross):
-            data[tri] = cord
-        return p_cross,np.nonzero(crossed_triangles)[0],data
+        crossed_triangles = np.nonzero(np.isin(side[self.f].sum(axis = 1),(1,2)))[0]
+        edge_keys = []
+        look_up = {}
+        for tri in crossed_triangles:
+            keys = []
+            for a,b in ((0,1),(1,2),(2,0)):
+                va,vb = self.f[tri,a],self.f[tri,b]
+                if side[va] == side[vb]:
+                    continue
+                key = min(va,vb)*n_v+max(va,vb)
+                if key not in look_up:
+                    t = d[va]/(d[va]-d[vb])
+                    look_up[key] = self.v[va]+t*(self.v[vb]-self.v[va]) # exact crossing point on the edge
+                keys.append(key)
+            edge_keys.append(keys)
+        return crossed_triangles,edge_keys,look_up
 
-    def conections(self,triangles_indices):
-        """ given a set of triangles give the conection between triangles """
-        conections = {}
-        triangles = self.f[triangles_indices]
-        for i,tri in zip(triangles_indices,triangles):
-            flags = (triangles == tri[0])+ (triangles == tri[1])+(triangles == tri[2])
-            index = np.where(flags.sum(axis = 1) ==2)[0]
-            conections[i] = triangles_indices[index]
-        return conections
-    
-    def sort_split(self,connections):
-        """ look for a open curve"""
-        triangles = list(connections.keys())
-        loose_ends = [ind for ind in connections.keys() if len(connections[ind])==1]
-        is_open = False
-        periodic = []
-        curves = [[]] # save the triangeles indices in lists for each curve
-        if len(loose_ends) == 0: # check if we have just loops or opn curves:
-            curves[-1].append(triangles[0])
-            triangles.remove(triangles[0])
-            is_open = True
-        else:
-            curves[-1].append(loose_ends[0])
-            triangles.remove(loose_ends[0])
-            loose_ends.remove(loose_ends[0])
-            is_open = False
-        
-        while len(triangles)>0:
-            c_element = curves[-1][-1]
-            if c_element in connections:
-                next_element = None
-                is_sadle= False
-                if len(connections[c_element])>2:
-                    is_sadle = True
-                for el in connections[c_element]:
-                    if el in triangles:
-                        next_element = el                        
-                        break
+    def chain_edges(self,edge_keys):
+        """ Link the crossed edges through the crossed triangles into curves.
+        Each crossed triangle joins its two crossed edges, so every edge has two
+        neighbours inside the mesh and one on the boundary of the mesh. Curves
+        that start and end on the boundary are open, the rest are closed loops. """
+        neighbours = {}
+        for e1,e2 in edge_keys:
+            neighbours.setdefault(e1,[]).append(e2)
+            neighbours.setdefault(e2,[]).append(e1)
 
-            if next_element in triangles:
-                curves[-1].append(next_element)
-                if is_sadle == False:
-                    triangles.remove(next_element)
-                if next_element in loose_ends:
-                    loose_ends.remove(next_element)
+        visited = set()
+        curves = []
+        closed = []
+        # open curves first, starting from an edge on the boundary of the mesh
+        starts = [e for e in neighbours if len(neighbours[e]) == 1]+list(neighbours)
+        for start in starts:
+            if start in visited:
+                continue
+            curve = [start]
+            visited.add(start)
+            current = start
+            while True:
+                next_edges = [e for e in neighbours[current] if e not in visited]
+                if len(next_edges) == 0:
+                    break
+                current = next_edges[0]
+                curve.append(current)
+                visited.add(current)
+            is_closed = len(curve) > 2 and start in neighbours[curve[-1]]
+            curves.append(curve)
+            closed.append(is_closed)
+        return curves,closed
 
-            if len(triangles) == 0:
-                if is_open == True:
-                    curves[-1].append(curves[-1][0])
-                    periodic.append(True)
-                else:
-                    periodic.append(False)
-            if next_element == None:
-                if is_open == True:
-                    curves[-1].append(curves[-1][0])
-                    periodic.append(True)
-                else:
-                    periodic.append(False)
-                curves.append([])
-                if len(loose_ends) == 0: # check if we have just loops or opn curves:
-                    curves[-1].append(triangles[0])
-                    triangles.remove(triangles[0])
-                    is_open = True
-                else:
-                    curves[-1].append(loose_ends[0])
-                    triangles.remove(loose_ends[0])
-                    loose_ends.remove(loose_ends[0])
-                    is_open = False
-        return curves,periodic
-    def orient_curves(self,curves,look_up,periodic):
-        """ given a set of curves orient them to have positive circulation """
+    def orient_curves(self,curves,look_up,closed,normal):
+        """ given a set of curves return their coordinates, with the closed
+        curves oriented to have positive circulation around the normal """
         oriented_curves = []
-        
-        for curve,periodic_flag in zip(curves,periodic):
-            curve_oriented = []
-            if periodic_flag == True:
-                position = []
-                for t in curve:
-                    position.append(look_up[t])
-                position = np.array(position)
-                delta_vectors = np.diff(position,axis =0)
-                cross = position[:-1,0]*delta_vectors[:,1]-position[:-1,1]*delta_vectors[:,0]
-                total_area = np.sum(cross)
-                if total_area<0:
-                    curve_oriented.append(np.flip(position, axis=0))
-                else: 
-                    curve_oriented.append(position)
-            oriented_curves.append(curve_oriented)
+        for curve,closed_flag in zip(curves,closed):
+            position = np.array([look_up[e] for e in curve])
+            if closed_flag:
+                area = np.cross(position,np.roll(position,-1,axis = 0)).sum(axis = 0)
+                if np.dot(area,normal) < 0:
+                    position = np.flip(position,axis = 0)
+            oriented_curves.append(position)
         return oriented_curves
-                    
-                
-                
+
     def isolinecoords(self,plane):
-        _, crossed_triangles,look_up = self.cross_surface(plane)
-        conections = self.conections(crossed_triangles)
-        curves,periodic = self.sort_split(conections)
-        curves_oriented = self.orient_curves(curves,look_up,periodic) # evaluate the orientation of the curves and return the coordinates 
-        for points in curves_oriented:
-            data = self.interpolate(points,periodic)
+        """ Return a list of [spline, length] for every curve where the plane
+        cuts the mesh, the longest curve first. Splines are parametrised by
+        the normalised arc length s; closed curves are periodic in s with
+        period 1, so spline(s) and spline(s+1) are the same point. """
+        _,edge_keys,look_up = self.cross_surface(plane)
+        curves,closed = self.chain_edges(edge_keys)
+        curves_oriented = self.orient_curves(curves,look_up,closed,plane[0])
+        data = []
+        for points,closed_flag in zip(curves_oriented,closed):
+            spline = self.interpolate(points,closed_flag)
+            if spline is not None:
+                data.append(spline)
+        data.sort(key = lambda spline: -spline[1])
         return data
-        
-    def interpolate(self,coordiantes,periodic):
-        splines = []
-        for p,s_points in zip(periodic,coordiantes):
-            dpoints = np.gradient(s_points,axis = 0)**2 
-            l = np.cumsum(np.sqrt(dpoints.sum(axis = 1))) # arclength parameter
-            lenght = l[-1]
-            l = l/lenght
-            if p == True:
-                bspl = make_interp_spline(l, s_points, k=5,bc_type = 'periodic')
-            else:
-                bspl = make_interp_spline(l, s_points, k=5,bc_type = 'natural')
-            splines.append([bspl,lenght])
-        return splines
-            
+
+    def interpolate(self,points,closed):
+        """ Interpolate the points of a curve with a spline of degree k
+        parametrised by the normalised chord length. Closed curves use periodic
+        boundary conditions so the curve and its derivatives match at the seam. """
+        # drop repeated points, for example when the plane passes through a vertex
+        nxt = np.roll(points,-1,axis = 0) if closed else points[1:]
+        seg = np.linalg.norm(nxt-points[:len(nxt)],axis = 1)
+        keep = seg > 1e-9*seg.max()
+        if not closed:
+            keep = np.r_[keep,True] # always keep the last point of an open curve
+        points = points[keep]
+        if closed:
+            points = np.vstack([points,points[:1]]) # close the curve, periodicity needs the first point repeated at the end
+        if len(points) < self.k+2:
+            return None
+        l = np.r_[0,np.cumsum(np.linalg.norm(np.diff(points,axis = 0),axis = 1))] # chord length parameter, starts at 0
+        lenght = l[-1]
+        l = l/lenght
+        if closed:
+            bspl = make_interp_spline(l, points, k=self.k,bc_type = 'periodic')
+        else:
+            bspl = make_interp_spline(l, points, k=self.k,bc_type = 'natural' if self.k == 3 else None)
+        s = np.linspace(0,1,20*len(points))
+        lenght = np.linalg.norm(np.diff(bspl(s),axis = 0),axis = 1).sum() # arc length of the spline
+        return [bspl,lenght]
+
+def circle_levels(radii, center = (0.0,0.0), n = 200, k = 3):
+    """ Concentric circles in the format of isolinecoords: one [[spline, length]]
+    per radius, counter-clockwise and periodic in s with period 1. Give the radii
+    from the outside in (bottom to top), to build a pattern without a target mesh. """
+    s = np.linspace(0,1,n+1)
+    levels = []
+    for r in radii:
+        points = np.column_stack([center[0]+r*np.cos(2*np.pi*s),center[1]+r*np.sin(2*np.pi*s),np.zeros(n+1)])
+        points[-1] = points[0]
+        levels.append([[make_interp_spline(s,points,k = k,bc_type = 'periodic'),2*np.pi*r]])
+    return levels
+
 def main():
-    v, f = igl.read_triangle_mesh('../data/offcenter.obj') # load a mesh
+    v, f = igl.read_triangle_mesh(os.path.join(DATA_DIR, 'offcenter.obj')) # load a mesh
     h = v[:,2]
     vals = np.linspace(h.min()*1.1,h.max()*0.9,10)
     iso = isolines(v,f)
@@ -180,17 +166,10 @@ def main():
         data =iso.isolinecoords([np.array([0,0,1]),np.array([0,0,vals])])
         for bspl,l in data:
               coord = bspl(s)
-              lines.append(coord)    
+              lines.append(coord)
               plt.plot(coord[:,0],coord[:,1],'-')
     plt.show()
-    
-   #ps.init() 
-   
-   #ps_mesh = ps.register_surface_mesh("my mesh", v, f, smooth_shade=True)
-   #ps_cloud = ps.register_point_cloud("my points", v_iso)
-   #ps.show()
-    
-        
-    
+
+
 if __name__ == "__main__":
     main()

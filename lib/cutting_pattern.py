@@ -1,8 +1,13 @@
+import os
+
 import numpy as np
 import igl
-from isolines import isolines
-from scipy.optimize import bisect, fsolve
 import matplotlib.pyplot as plt
+from scipy.optimize import fsolve
+
+from isolines import isolines
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 
 def spline_line_intersection(spline, th,center=(0,0)):
     # This function computes the intersection between a spline and line with slope th
@@ -24,9 +29,28 @@ def spline_line_intersection(spline, th,center=(0,0)):
         return (coords[:,0]-center[0])*np.sin(th) - (coords[:,1]-center[1])*np.cos(th)
     
     root = fsolve(equations, sg)[0]
-    return root
+    return root % 1.0 # the closed isolines are periodic in s with period 1
 
-def cutting_patern(isolevels, height, N = 6, center = None):
+
+def cutting_sections(isolevels,N = 6,center = None):
+    # Return the t parameter for each isolevel where the line is cutterd by N lines for each isolevel
+    # the order of the t parameter is based the position of the lines and this lines are equally spaced in angle
+    # also they are ordered from 0 to 2pi
+    s = np.linspace(0,1,100)
+    center = center if center is not None else np.mean(isolevels[-1][0][0](s),axis=0)[:2]
+    cuts = []
+
+    for j in range(len(isolevels)):
+        spline = isolevels[j][0][0]                
+        s_intersection = []
+        for i in range(N):
+            th = 2*i*np.pi/N
+            root = spline_line_intersection(spline, th,center)
+            s_intersection.append(root)
+        cuts.append(s_intersection)
+    return cuts
+
+def cutting_patern(isolevels, height, N = 6, center = None, overlap = None):
     # Given a set of isolevels and heights, return a cutting patern
     # the isolevels are a set of splines representing the isolines at different heights
     # height is the height of the isolines
@@ -34,22 +58,10 @@ def cutting_patern(isolevels, height, N = 6, center = None):
     # The isolevels and height should be order from bottom to top
     # Also in nessesary, to define the center of the pattern
     # If center is None, the center of the last isolevel is used
-    s = np.linspace(0,1,100)
-    center = center if center is not None else np.mean(isolevels[-1][0][0](s),axis=0)[:2]
-    #print("center:", center)
-    cuts = []
+    # overlap is an optional constant overlap length D (in the units of the mesh)
+    # used for every beam instead of D = (delta*W)^(1/3)
+    cuts = cutting_sections(isolevels, N, center)
 
-    for j in range(len(isolevels)):
-        spline = isolevels[j][0][0]
-        x_vals = spline(s)[:,0]
-        y_vals = spline(s)[:,1]
-                
-        s_intersection = []
-        for i in range(N):
-            th = 2*i*np.pi/N
-            root = spline_line_intersection(spline, th,center)
-            s_intersection.append(root)
-        cuts.append(s_intersection)
     # Now plot the cutting create the cutting pattern and add the overlap to the s_intersection variables
     cuts_with_overlap = []
     for j in range(len(height)-1):
@@ -59,8 +71,7 @@ def cutting_patern(isolevels, height, N = 6, center = None):
         sub_cuts_overlap = []
         for i in range(len(cuts[j])):
             w = np.sqrt(np.sum((isolevels[j+1][0][0](cuts[j+1][i])[:2]-isolevels[j][0][0](cuts[j][i])[:2])**2)) # distance between the two isolines at this cut
-            D = (delta*w)**(1/3) # overlap distance we assume that F/(NB) = 1 
-            print(D)
+            D = (delta*w)**(1/3) if overlap is None else overlap # overlap distance we assume that F/(NB) = 1 
             ovelap_parameter =  D/lenght
             # The side parametre is 1 if we are going up, -1 if we are going down, depending on j and i
             side = 1 if i%2==0 else -1
@@ -69,11 +80,9 @@ def cutting_patern(isolevels, height, N = 6, center = None):
             sub_cuts_overlap.append(new_cut)
 
         cuts_with_overlap.append(sub_cuts_overlap)
-    # Now plot the cutting pattern
     cut_spans = []
     for j in range(len(height)-1):
         from_to_spans = []
-        spline = isolevels[j][0][0]
         for i in range(int(N/2)):   
             if j%2 ==0:
                 from_s = cuts_with_overlap[j][2*i]
@@ -101,7 +110,7 @@ def plot_cutting_pattern(isolevels, cutting_lines):
             
 def main():
     # Example of usage
-    v, f = igl.read_triangle_mesh('../data/parabole.obj') # load a mesh
+    v, f = igl.read_triangle_mesh(os.path.join(DATA_DIR, 'parabole.obj')) # load a mesh
     h = v[:,2]
     vals = np.linspace(h.min()*1.05,h.max()*0.95,15)
     iso = isolines(v,f)
@@ -110,10 +119,10 @@ def main():
         line =iso.isolinecoords([np.array([0,0,1]),np.array([0,0,val])])
         lines.append(line)
     cutting_lines = cutting_patern(lines, vals, N = 6)
+    
     # Plot the cutting pattern
     plot_cutting_pattern(lines, cutting_lines)
+
+
 if __name__ == "__main__":
     main()
-            
-
-    
